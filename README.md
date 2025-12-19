@@ -67,7 +67,7 @@ Foldr is a programming language that combines the power and familiarity of C++ s
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/foldr.git
+git clone https://github.com/nikolasroufas/foldr.git
 cd foldr
 
 # Compile the interpreter
