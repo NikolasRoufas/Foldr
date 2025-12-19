@@ -52,7 +52,6 @@ Foldr is a programming language that combines the power and familiarity of C++ s
 ### File Extensions
 
 - **`.fld`** - Primary source file extension
-- **`.flr`** - Alternative runtime file extension
 
 ---
 
