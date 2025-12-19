@@ -1,6 +1,6 @@
 /*
  * Foldr Programming Language - Interpreter
- * Version 1.0.0
+ * Version 1.0.1
  * Compile: gcc -o foldr foldr.c -lm
  * Usage: ./foldr [file.fld]
  *        ./foldr (shows ASCII logo)
@@ -12,7 +12,7 @@
 #include <ctype.h>
 #include <math.h>
 
-#define VERSION "1.0.0"
+#define VERSION "1.0.1"
 #define MAX_TOKEN_LEN 256
 #define MAX_TOKENS 10000
 #define MAX_VARS 1000
@@ -25,6 +25,8 @@ typedef enum {
     // Keywords
     TOK_FUNC, TOK_LET, TOK_CONST, TOK_IF, TOK_ELSE, 
     TOK_FOR, TOK_WHILE, TOK_RETURN, TOK_IN,
+    TOK_BREAK, TOK_CONTINUE,
+
     // Types
     TOK_INT, TOK_FLOAT, TOK_STRING, TOK_BOOL, TOK_ARRAY, TOK_VOID,
     // Literals
@@ -59,6 +61,7 @@ typedef enum {
     NODE_PROGRAM, NODE_FUNC_DECL, NODE_VAR_DECL, 
     NODE_IF_STMT, NODE_FOR_STMT, NODE_WHILE_STMT,
     NODE_RETURN_STMT, NODE_EXPR_STMT, NODE_BLOCK,
+    NODE_BREAK_STMT, NODE_CONTINUE_STMT,
     NODE_BINARY_OP, NODE_UNARY_OP, NODE_ASSIGN,
     NODE_CALL, NODE_LITERAL, NODE_IDENTIFIER,
     NODE_ARRAY_LIT, NODE_INDEX
@@ -152,7 +155,9 @@ typedef struct Value {
 typedef struct {
     char name[MAX_TOKEN_LEN];
     Value value;
+    int is_const;
 } Variable;
+
 
 typedef struct {
     char name[MAX_TOKEN_LEN];
@@ -172,6 +177,8 @@ typedef struct {
 Environment global_env;
 int return_flag = 0;
 Value return_value;
+int break_flag = 0;
+int continue_flag = 0;
 
 // ============= ASCII LOGO =============
 void show_logo() {
@@ -188,10 +195,12 @@ void show_logo() {
 }
 
 // ============= UTILITY FUNCTIONS =============
-void error(const char *msg) {
-    fprintf(stderr, "Error: %s\n", msg);
+void error_at_token(const char *msg, Token *t) {
+    fprintf(stderr, "Error: %s (line %d, token='%s', type=%d)\n",
+            msg, t ? t->line : -1, t ? t->value : "?", t ? t->type : -1);
     exit(1);
 }
+
 
 char* read_file(const char *filename) {
     FILE *file = fopen(filename, "r");
@@ -214,6 +223,8 @@ char* read_file(const char *filename) {
 
 // ============= TOKENIZER =============
 int is_keyword(const char *str, TokenType *type) {
+    if (strcmp(str, "break") == 0) { *type = TOK_BREAK; return 1; }
+    if (strcmp(str, "continue") == 0) { *type = TOK_CONTINUE; return 1; }
     if (strcmp(str, "func") == 0) { *type = TOK_FUNC; return 1; }
     if (strcmp(str, "let") == 0) { *type = TOK_LET; return 1; }
     if (strcmp(str, "const") == 0) { *type = TOK_CONST; return 1; }
@@ -223,12 +234,6 @@ int is_keyword(const char *str, TokenType *type) {
     if (strcmp(str, "while") == 0) { *type = TOK_WHILE; return 1; }
     if (strcmp(str, "return") == 0) { *type = TOK_RETURN; return 1; }
     if (strcmp(str, "in") == 0) { *type = TOK_IN; return 1; }
-    if (strcmp(str, "int") == 0) { *type = TOK_INT; return 1; }
-    if (strcmp(str, "float") == 0) { *type = TOK_FLOAT; return 1; }
-    if (strcmp(str, "string") == 0) { *type = TOK_STRING; return 1; }
-    if (strcmp(str, "bool") == 0) { *type = TOK_BOOL; return 1; }
-    if (strcmp(str, "array") == 0) { *type = TOK_ARRAY; return 1; }
-    if (strcmp(str, "void") == 0) { *type = TOK_VOID; return 1; }
     if (strcmp(str, "true") == 0) { *type = TOK_TRUE; return 1; }
     if (strcmp(str, "false") == 0) { *type = TOK_FALSE; return 1; }
     return 0;
@@ -257,17 +262,19 @@ void tokenize(const char *source, Tokenizer *tok) {
         Token *token = &tok->tokens[tok->count++];
         token->line = line;
         
-        // String literals
-        if (*p == '"') {
+        // String literals (supports "..." and '...')
+        if (*p == '"' || *p == '\'') {
+            char quote = *p;
             p++;
             int i = 0;
-            while (*p && *p != '"' && i < MAX_TOKEN_LEN - 1) {
+            while (*p && *p != quote && i < MAX_TOKEN_LEN - 1) {
                 token->value[i++] = *p++;
             }
             token->value[i] = '\0';
-            if (*p == '"') p++;
+            if (*p == quote) p++;
             token->type = TOK_STRING_LIT;
         }
+
         // Numbers
         else if (isdigit(*p)) {
             int i = 0;
@@ -452,8 +459,9 @@ ASTNode* parse_primary(Tokenizer *tok) {
         return node;
     }
     
-    error("Unexpected token in expression");
+    error_at_token("Unexpected token in expression", t);
     return NULL;
+
 }
 
 ASTNode* parse_binary(Tokenizer *tok) {
@@ -487,6 +495,49 @@ ASTNode* parse_expression(Tokenizer *tok) {
 ASTNode* parse_statement(Tokenizer *tok) {
     Token *t = peek(tok);
     ASTNode *node = malloc(sizeof(ASTNode));
+
+    // Break statement
+    if (t->type == TOK_BREAK) {
+        advance(tok);
+        node->type = NODE_BREAK_STMT;
+        if (peek(tok)->type == TOK_SEMICOLON) advance(tok);
+        return node;
+    }
+
+    // Continue statement
+    if (t->type == TOK_CONTINUE) {
+        advance(tok);
+        node->type = NODE_CONTINUE_STMT;
+        if (peek(tok)->type == TOK_SEMICOLON) advance(tok);
+        return node;
+    }
+
+    // While loop
+    if (t->type == TOK_WHILE) {
+        advance(tok);
+        node->type = NODE_WHILE_STMT;
+
+        match(tok, TOK_LPAREN);
+        node->data.while_stmt.condition = parse_expression(tok);
+        match(tok, TOK_RPAREN);
+
+        match(tok, TOK_LBRACE);
+
+        node->data.while_stmt.body = malloc(sizeof(ASTNode));
+        node->data.while_stmt.body->type = NODE_BLOCK;
+        node->data.while_stmt.body->data.block.stmt_count = 0;
+        node->data.while_stmt.body->data.block.statements = malloc(sizeof(ASTNode*) * 1000);
+
+        while (peek(tok)->type != TOK_RBRACE && peek(tok)->type != TOK_EOF) {
+            node->data.while_stmt.body->data.block.statements[
+                node->data.while_stmt.body->data.block.stmt_count++
+            ] = parse_statement(tok);
+        }
+
+        match(tok, TOK_RBRACE);
+        return node;
+    }
+
     
     // Function declaration
     if (t->type == TOK_FUNC) {
@@ -671,6 +722,7 @@ ASTNode* parse_statement(Tokenizer *tok) {
     return NULL;
 }
 
+
 ASTNode* parse_program(Tokenizer *tok) {
     ASTNode *program = malloc(sizeof(ASTNode));
     program->type = NODE_PROGRAM;
@@ -744,13 +796,19 @@ Function* find_func(Environment *env, const char *name) {
 void set_var(Environment *env, const char *name, Value val) {
     Variable *var = find_var(env, name);
     if (var) {
+        if (var->is_const) {
+            fprintf(stderr, "Error: Cannot reassign const variable '%s'\n", name);
+            exit(1);
+        }
         var->value = val;
     } else {
         strcpy(env->vars[env->var_count].name, name);
         env->vars[env->var_count].value = val;
+        env->vars[env->var_count].is_const = 0; // default
         env->var_count++;
     }
 }
+
 
 Value eval(ASTNode *node, Environment *env);
 
@@ -814,13 +872,48 @@ Value eval(ASTNode *node, Environment *env) {
     if (!node) return create_null();
     
     switch (node->type) {
+
+        case NODE_BREAK_STMT:
+            break_flag = 1;
+            return create_null();
+
+        case NODE_CONTINUE_STMT:
+            continue_flag = 1;
+            return create_null();
+
+        case NODE_WHILE_STMT: {
+            while (1) {
+                Value cond = eval(node->data.while_stmt.condition, env);
+                int is_true = (cond.type == VAL_BOOL && cond.data.bool_val) ||
+                            (cond.type == VAL_INT && cond.data.int_val != 0);
+
+                if (!is_true) break;
+
+                eval(node->data.while_stmt.body, env);
+
+                if (return_flag) break;
+
+                if (break_flag) {
+                    break_flag = 0;
+                    break;
+                }
+
+                if (continue_flag) {
+                    continue_flag = 0;
+                    continue;
+                }
+            }
+            return create_null();
+        }
+
         case NODE_PROGRAM:
         case NODE_BLOCK:
             for (int i = 0; i < node->data.block.stmt_count; i++) {
                 eval(node->data.block.statements[i], env);
-                if (return_flag) break;
+                if (return_flag || break_flag || continue_flag) break;
             }
             return create_null();
+
             
         case NODE_FUNC_DECL: {
             Function *func = &env->funcs[env->func_count++];
@@ -834,6 +927,10 @@ Value eval(ASTNode *node, Environment *env) {
         case NODE_VAR_DECL: {
             Value val = eval(node->data.var.init, env);
             set_var(env, node->data.var.name, val);
+
+            Variable *v = find_var(env, node->data.var.name);
+            if (v) v->is_const = node->data.var.is_const;
+
             return create_null();
         }
         
@@ -876,12 +973,25 @@ Value eval(ASTNode *node, Environment *env) {
             if (iterable.type == VAL_ARRAY) {
                 for (int i = 0; i < iterable.data.array_val.count; i++) {
                     set_var(env, node->data.for_stmt.iterator, *iterable.data.array_val.elements[i]);
+
                     eval(node->data.for_stmt.body, env);
+
                     if (return_flag) break;
+
+                    if (break_flag) {
+                        break_flag = 0;
+                        break;
+                    }
+
+                    if (continue_flag) {
+                        continue_flag = 0;
+                        continue;
+                    }
                 }
             }
             return create_null();
         }
+
         
         case NODE_RETURN_STMT:
             return_value = eval(node->data.return_stmt.value, env);
@@ -897,6 +1007,30 @@ Value eval(ASTNode *node, Environment *env) {
         case NODE_CALL: {
             const char *name = node->data.call.name;
             
+
+            if (strcmp(name, "input") == 0) {
+                // Optional prompt: input("Enter: ")
+                if (node->data.call.arg_count >= 1) {
+                    Value prompt = eval(node->data.call.args[0], env);
+                    if (prompt.type == VAL_STRING) {
+                        printf("%s", prompt.data.string_val);
+                        fflush(stdout);
+                    }
+                }
+
+                char buffer[1024];
+                if (!fgets(buffer, sizeof(buffer), stdin)) {
+                    return create_string("");
+                }
+
+                // strip trailing newline
+                size_t len = strlen(buffer);
+                if (len > 0 && buffer[len - 1] == '\n') buffer[len - 1] = '\0';
+
+                return create_string(buffer);
+            }
+
+
             // Built-in functions
             if (strcmp(name, "print") == 0) {
                 for (int i = 0; i < node->data.call.arg_count; i++) {
